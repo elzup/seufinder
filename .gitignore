@@ -1,0 +1,15 @@
+# Compiled binaries
+seufinder
+
+# Build artifacts
+*.o
+*.exe
+*.out
+
+# Temporary files
+*.tmp
+*.log
+
+# exported data
+viz.txt
+seufinder.csv

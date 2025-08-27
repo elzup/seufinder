@@ -21,6 +21,26 @@ g++ -std=c++17 seufinder.cpp -o seufinder
 - `seufinder.cpp`: メインの C++ソースコード
 - `spec.md`: 仕様や実験内容の説明
 
+## 主なオプション
+
+- `-m <GiB>`: 占有メモリサイズ（GiB 単位、例: `-m 1`）
+- `-i <sec>`: 走査間隔（秒、例: `-i 900`）
+- `-t <num>`: スレッド数（例: `-t 1`）
+- `--verify <num>`: 再読回数（例: `--verify 2`）
+- `-o <file>`: 結果 CSV ファイル名（例: `-o seufinder.csv`）
+- `--viz-map <file>`: 可視化ログ出力先（例: `--viz-map viz.txt`）
+- `--viz-cols <num>`: 可視化グリッドの列数（例: `--viz-cols 20`）
+- `--viz-rows <num>`: 可視化グリッドの行数（例: `--viz-rows 12`）
+- `--clflush`: キャッシュフラッシュ有効化
+- `--lock-pages`: メモリページロック
+
+## 機能概要
+
+- 決定論的パターンを書き込み、一定間隔で走査・再現確認
+- DRAM ビット反転（SEU）を検出し CSV 記録
+- ASCII グリッドによる可視化ログ出力
+- 大量の物理メモリを使用するため、十分な空きメモリが必要
+
 ## ライセンス
 
 MIT

@@ -272,7 +272,7 @@ int main(int argc, char** argv){
       size_t end   = (t==cfg.threads-1) ? region.words : begin + chunk;
 
       th.emplace_back([&, t, begin, end](){
-        const u64* base_ro = reinterpret_cast<const u64*>(region.base);
+  const volatile u64* base_ro = reinterpret_cast<const volatile u64*>(region.base);
         volatile u64* base_rw = region.base;
         auto& bins = local_bins[t];
 
