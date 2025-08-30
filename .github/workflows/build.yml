@@ -19,21 +19,17 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y g++
 
-      - name: Install deps (macOS)
-        if: matrix.os == 'macos-latest'
-        run: brew install llvm
-
       - name: Build (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: g++ -O2 -o seufinder seufinder.cpp
+        run: g++ -O2 -std=c++17 -o seufinder seufinder.cpp
 
       - name: Build (macOS)
         if: matrix.os == 'macos-latest'
-        run: clang++ -O2 -o seufinder seufinder.cpp
+        run: clang++ -O2 -std=c++17 -o seufinder seufinder.cpp
 
       - name: Build (Windows)
         if: matrix.os == 'windows-latest'
-        run: cl /O2 /Fe:seufinder.exe seufinder.cpp
+        run: cl /EHsc /O2 /std:c++17 /Fe:seufinder.exe seufinder.cpp
 
       - name: Package artifact
         uses: actions/upload-artifact@v4
