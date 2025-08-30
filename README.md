@@ -1,4 +1,4 @@
-# seu-checker
+# SeuFinder
 
 SEU (Single Event Upset) の検出・実験用 C++プログラムです。
 
