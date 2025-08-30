@@ -27,6 +27,10 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: clang++ -O2 -std=c++17 -o seufinder seufinder.cpp
 
+      - name: Setup MSVC (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Build (Windows)
         if: matrix.os == 'windows-latest'
         run: cl /EHsc /O2 /std:c++17 /Fe:seufinder.exe seufinder.cpp
