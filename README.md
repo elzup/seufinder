@@ -16,6 +16,8 @@ g++ -std=c++17 seufinder.cpp -o seufinder
 ./seufinder
 ```
 
+![スクリーンショット](ss.png)
+
 ## ファイル構成
 
 - `seufinder.cpp`: メインの C++ソースコード
