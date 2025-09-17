@@ -4,7 +4,7 @@ SEU (Single Event Upset) の検出・実験用 C++プログラムです。
 
 ## 使い方
 
-1. コンパイル
+1. C++ 版コンパイル
 
 ```sh
 g++ -std=c++17 seufinder.cpp -o seufinder
@@ -18,9 +18,27 @@ g++ -std=c++17 seufinder.cpp -o seufinder
 
 ![スクリーンショット](ss.png)
 
+### Rust 版
+
+1. ビルド
+
+```sh
+cargo build --release
+```
+
+2. 実行
+
+```sh
+./target/release/seufinder-rs
+```
+
+Rust 版も C++ 版と同じオプションをサポートしています。
+
 ## ファイル構成
 
 - `seufinder.cpp`: メインの C++ソースコード
+- `Cargo.toml`: Rust 版のビルド設定
+- `src/main.rs`: Rust 版のエントリポイント
 - `spec.md`: 仕様や実験内容の説明
 
 ## 主なオプション
