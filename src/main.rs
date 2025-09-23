@@ -179,7 +179,7 @@ fn parse_args() -> Result<(Config, VizCfg), String> {
     let mut cfg = Config::default();
     let mut viz = VizCfg::default();
 
-    let mut args = env::args().skip(1).collect::<Vec<_>>();
+    let args = env::args().skip(1).collect::<Vec<_>>();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -396,70 +396,118 @@ fn scan_once(
     let clamp = viz.clamp_0_9;
 
     thread::scope(|scope| {
-        for t in 0..threads {
-            let begin = t * (words / threads);
-            let end = if t == threads - 1 {
-                words
-            } else {
-                begin + (words / threads)
-            };
-            let region = Arc::clone(region);
-            let csv = Arc::clone(csv);
-            let stats = Arc::clone(stats);
-            let stop = Arc::clone(stop);
-            let bins_ptr = if map_enabled {
-                Some(&mut local_bins[t] as *mut Vec<u32>)
-            } else {
-                None
-            };
+        let base = if threads == 0 { 0 } else { words / threads };
+        let remainder = if threads == 0 { 0 } else { words % threads };
 
-            scope.spawn(move || {
-                let ptr = region.as_ptr();
-                for i in begin..end {
-                    if stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let exp = pattern_from_index(i as u64);
-                    if use_clflush {
-                        unsafe { clflush64(ptr.add(i) as *const u8) };
-                    }
-                    let v1 = unsafe { std::ptr::read_volatile(ptr.add(i)) };
-                    if v1 != exp {
-                        let mut mismatches = 0usize;
-                        let mut last = v1;
-                        for _ in 1..verify_reads {
-                            if use_clflush {
-                                unsafe { clflush64(ptr.add(i) as *const u8) };
-                            }
-                            thread::sleep(Duration::from_micros(50));
-                            let vr = unsafe { std::ptr::read_volatile(ptr.add(i)) };
-                            last = vr;
-                            if vr != exp {
-                                mismatches += 1;
-                            }
+        if map_enabled {
+            let mut next_begin = 0usize;
+            for (t, bins) in local_bins.iter_mut().enumerate() {
+                let mut len = base;
+                if t < remainder {
+                    len += 1;
+                }
+                let begin = next_begin;
+                let end = std::cmp::min(words, begin.saturating_add(len));
+                next_begin = end;
+
+                let region = Arc::clone(region);
+                let csv = Arc::clone(csv);
+                let stats = Arc::clone(stats);
+                let stop = Arc::clone(stop);
+                scope.spawn(move || {
+                    let bins = bins;
+                    let ptr = region.as_ptr();
+                    for i in begin..end {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
                         }
-                        if mismatches == verify_reads - 1 {
-                            stats.detected.fetch_add(1, Ordering::Relaxed);
-                            log_event(&csv, t, i as u64, exp, last, verify_reads);
-                            unsafe { std::ptr::write_volatile(ptr.add(i), exp) };
-                            if let Some(bp) = bins_ptr {
-                                unsafe {
-                                    let bins = &mut *bp;
-                                    let idx = std::cmp::min(cells - 1, i / words_per_cell);
-                                    if clamp {
-                                        if bins[idx] < 9 {
-                                            bins[idx] += 1;
-                                        }
-                                    } else {
-                                        bins[idx] = bins[idx].saturating_add(1);
+                        let exp = pattern_from_index(i as u64);
+                        if use_clflush {
+                            unsafe { clflush64(ptr.add(i) as *const u8) };
+                        }
+                        let v1 = unsafe { std::ptr::read_volatile(ptr.add(i)) };
+                        if v1 != exp {
+                            let mut mismatches = 0usize;
+                            let mut last = v1;
+                            for _ in 1..verify_reads {
+                                if use_clflush {
+                                    unsafe { clflush64(ptr.add(i) as *const u8) };
+                                }
+                                thread::sleep(Duration::from_micros(50));
+                                let vr = unsafe { std::ptr::read_volatile(ptr.add(i)) };
+                                last = vr;
+                                if vr != exp {
+                                    mismatches += 1;
+                                }
+                            }
+                            if mismatches == verify_reads - 1 {
+                                stats.detected.fetch_add(1, Ordering::Relaxed);
+                                log_event(&csv, t, i as u64, exp, last, verify_reads);
+                                unsafe { std::ptr::write_volatile(ptr.add(i), exp) };
+                                let idx = std::cmp::min(cells - 1, i / words_per_cell);
+                                if clamp {
+                                    if bins[idx] < 9 {
+                                        bins[idx] += 1;
                                     }
+                                } else {
+                                    bins[idx] = bins[idx].saturating_add(1);
                                 }
                             }
                         }
+                        stats.scanned.fetch_add(1, Ordering::Relaxed);
                     }
-                    stats.scanned.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+        } else {
+            let mut next_begin = 0usize;
+            for t in 0..threads {
+                let mut len = base;
+                if t < remainder {
+                    len += 1;
                 }
-            });
+                let begin = next_begin;
+                let end = std::cmp::min(words, begin.saturating_add(len));
+                next_begin = end;
+
+                let region = Arc::clone(region);
+                let csv = Arc::clone(csv);
+                let stats = Arc::clone(stats);
+                let stop = Arc::clone(stop);
+                scope.spawn(move || {
+                    let ptr = region.as_ptr();
+                    for i in begin..end {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let exp = pattern_from_index(i as u64);
+                        if use_clflush {
+                            unsafe { clflush64(ptr.add(i) as *const u8) };
+                        }
+                        let v1 = unsafe { std::ptr::read_volatile(ptr.add(i)) };
+                        if v1 != exp {
+                            let mut mismatches = 0usize;
+                            let mut last = v1;
+                            for _ in 1..verify_reads {
+                                if use_clflush {
+                                    unsafe { clflush64(ptr.add(i) as *const u8) };
+                                }
+                                thread::sleep(Duration::from_micros(50));
+                                let vr = unsafe { std::ptr::read_volatile(ptr.add(i)) };
+                                last = vr;
+                                if vr != exp {
+                                    mismatches += 1;
+                                }
+                            }
+                            if mismatches == verify_reads - 1 {
+                                stats.detected.fetch_add(1, Ordering::Relaxed);
+                                log_event(&csv, t, i as u64, exp, last, verify_reads);
+                                unsafe { std::ptr::write_volatile(ptr.add(i), exp) };
+                            }
+                        }
+                        stats.scanned.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
         }
     });
 
@@ -523,26 +571,9 @@ fn main() {
     }
 
     eprintln!("[INFO] Initializing pattern...");
-    let init_threads = cfg.threads.max(1);
-    thread::scope(|scope| {
-        for t in 0..init_threads {
-            let total = words;
-            let chunk = total / init_threads;
-            let begin = t * chunk;
-            let end = if t == init_threads - 1 {
-                total
-            } else {
-                begin + chunk
-            };
-            let slice = &mut data[begin..end];
-            scope.spawn(move || {
-                for (offset, slot) in slice.iter_mut().enumerate() {
-                    let idx = begin + offset;
-                    *slot = pattern_from_index(idx as u64);
-                }
-            });
-        }
-    });
+    for (idx, slot) in data.iter_mut().enumerate() {
+        *slot = pattern_from_index(idx as u64);
+    }
 
     let region = Arc::new(Region::from_vec(data));
 

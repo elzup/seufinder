@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 chrono = { version = "0.4", features = ["clock"] }
-signal-hook = { version = "0.3", features = ["flag"] }
+signal-hook = { version = "0.3" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
