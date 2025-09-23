@@ -59,7 +59,7 @@ unsafe fn clflush64(ptr: *const u8) {
 #[inline(always)]
 unsafe fn clflush64(_ptr: *const u8) {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Config {
     gib: usize,
     interval_sec: u64,
@@ -86,7 +86,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct VizCfg {
     map_path: Option<PathBuf>,
     cols: usize,
@@ -176,34 +176,42 @@ fn pattern_from_index(idx: u64) -> u64 {
 }
 
 fn parse_args() -> Result<(Config, VizCfg), String> {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    parse_args_from(args)
+}
+
+fn parse_args_from<I>(args: I) -> Result<(Config, VizCfg), String>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut cfg = Config::default();
     let mut viz = VizCfg::default();
 
-    let args = env::args().skip(1).collect::<Vec<_>>();
+    let args_vec = args.into_iter().collect::<Vec<_>>();
     let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
+    while i < args_vec.len() {
+        let a = &args_vec[i];
         match a.as_str() {
             "-m" => {
                 i += 1;
-                let val = args.get(i).ok_or("-m requires a value")?;
+                let val = args_vec.get(i).ok_or("-m requires a value")?;
                 cfg.gib = val.parse().map_err(|_| "invalid GiB value".to_string())?;
             }
             "-i" => {
                 i += 1;
-                let val = args.get(i).ok_or("-i requires a value")?;
+                let val = args_vec.get(i).ok_or("-i requires a value")?;
                 cfg.interval_sec = val.parse().map_err(|_| "invalid interval".to_string())?;
             }
             "-t" => {
                 i += 1;
-                let val = args.get(i).ok_or("-t requires a value")?;
+                let val = args_vec.get(i).ok_or("-t requires a value")?;
                 cfg.threads = val
                     .parse()
                     .map_err(|_| "invalid thread count".to_string())?;
             }
             "--verify" => {
                 i += 1;
-                let val = args.get(i).ok_or("--verify requires a value")?;
+                let val = args_vec.get(i).ok_or("--verify requires a value")?;
                 cfg.verify_reads = val
                     .parse()
                     .map_err(|_| "invalid verify count".to_string())?;
@@ -213,12 +221,12 @@ fn parse_args() -> Result<(Config, VizCfg), String> {
             }
             "-o" => {
                 i += 1;
-                let val = args.get(i).ok_or("-o requires a value")?;
+                let val = args_vec.get(i).ok_or("-o requires a value")?;
                 cfg.out_csv = PathBuf::from(val);
             }
             "--iterations" => {
                 i += 1;
-                let val = args.get(i).ok_or("--iterations requires a value")?;
+                let val = args_vec.get(i).ok_or("--iterations requires a value")?;
                 let parsed: i64 = val.parse().map_err(|_| "invalid iterations".to_string())?;
                 if parsed > 0 {
                     cfg.iterations = Some(parsed as u64);
@@ -231,17 +239,17 @@ fn parse_args() -> Result<(Config, VizCfg), String> {
             }
             "--viz-map" => {
                 i += 1;
-                let val = args.get(i).ok_or("--viz-map requires a value")?;
+                let val = args_vec.get(i).ok_or("--viz-map requires a value")?;
                 viz.map_path = Some(PathBuf::from(val));
             }
             "--viz-cols" => {
                 i += 1;
-                let val = args.get(i).ok_or("--viz-cols requires a value")?;
+                let val = args_vec.get(i).ok_or("--viz-cols requires a value")?;
                 viz.cols = val.parse().map_err(|_| "invalid viz cols".to_string())?;
             }
             "--viz-rows" => {
                 i += 1;
-                let val = args.get(i).ok_or("--viz-rows requires a value")?;
+                let val = args_vec.get(i).ok_or("--viz-rows requires a value")?;
                 viz.rows = val.parse().map_err(|_| "invalid viz rows".to_string())?;
             }
             "--viz-unclamped" => {
@@ -631,4 +639,137 @@ fn main() {
     }
 
     eprintln!("[INFO] bye");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn parse(args: &[&str]) -> (Config, VizCfg) {
+        let owned = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        parse_args_from(owned).expect("failed to parse args")
+    }
+
+    #[test]
+    fn parse_args_defaults_match_config() {
+        let (cfg, viz) = parse(&[]);
+        assert_eq!(cfg.gib, 1);
+        assert_eq!(cfg.interval_sec, 900);
+        assert_eq!(cfg.threads, 1);
+        assert_eq!(cfg.verify_reads, 2);
+        assert_eq!(cfg.iterations, None);
+        assert!(!cfg.use_clflush);
+        assert!(!cfg.lock_pages);
+        assert!(viz.map_path.is_none());
+        assert_eq!(viz.cols, 20);
+        assert_eq!(viz.rows, 12);
+        assert!(viz.clamp_0_9);
+    }
+
+    #[test]
+    fn parse_args_overrides_values() {
+        let (cfg, viz) = parse(&[
+            "-m",
+            "3",
+            "-i",
+            "60",
+            "-t",
+            "4",
+            "--verify",
+            "5",
+            "--clflush",
+            "-o",
+            "custom.csv",
+            "--iterations",
+            "7",
+            "--lock-pages",
+            "--viz-map",
+            "viz.log",
+            "--viz-cols",
+            "10",
+            "--viz-rows",
+            "8",
+            "--viz-unclamped",
+        ]);
+
+        assert_eq!(cfg.gib, 3);
+        assert_eq!(cfg.interval_sec, 60);
+        assert_eq!(cfg.threads, 4);
+        assert_eq!(cfg.verify_reads, 5);
+        assert!(cfg.use_clflush);
+        assert_eq!(cfg.out_csv, PathBuf::from("custom.csv"));
+        assert_eq!(cfg.iterations, Some(7));
+        assert!(cfg.lock_pages);
+        assert_eq!(viz.map_path, Some(PathBuf::from("viz.log")));
+        assert_eq!(viz.cols, 10);
+        assert_eq!(viz.rows, 8);
+        assert!(!viz.clamp_0_9);
+    }
+
+    #[test]
+    fn parse_args_requires_values() {
+        let err = parse_args_from(vec!["-m".to_string()]).unwrap_err();
+        assert!(err.contains("requires a value"));
+    }
+
+    #[test]
+    fn pattern_generator_matches_expected_values() {
+        assert_eq!(pattern_from_index(0), 0x0f4a_01b8_4757_d994);
+        assert_eq!(pattern_from_index(1), 0x84ac_eac4_89e9_99d5);
+        assert_eq!(pattern_from_index(123_456), 0x5352_b57d_463f_c5b8);
+    }
+
+    #[test]
+    fn viz_write_frame_clamps_values() {
+        let path = std::env::temp_dir().join(format!(
+            "seufinder_test_{}_{}_clamp.txt",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_file(&path);
+        let viz = VizCfg {
+            map_path: Some(path.clone()),
+            cols: 3,
+            rows: 2,
+            clamp_0_9: true,
+        };
+        let bins = vec![0, 1, 9, 10, 11, 12];
+        viz_write_frame(&viz, &bins).expect("write frame");
+
+        let content = fs::read_to_string(&path).expect("read viz file");
+        assert!(content.contains("#19"));
+        assert!(content.contains("999"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn viz_write_frame_unclamped_uses_alphabet() {
+        let path = std::env::temp_dir().join(format!(
+            "seufinder_test_{}_{}_unclamp.txt",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_file(&path);
+        let viz = VizCfg {
+            map_path: Some(path.clone()),
+            cols: 4,
+            rows: 1,
+            clamp_0_9: false,
+        };
+        let bins = vec![0, 9, 10, 36];
+        viz_write_frame(&viz, &bins).expect("write frame");
+
+        let content = fs::read_to_string(&path).expect("read viz file");
+        assert!(content.contains("#9A*"));
+        let _ = fs::remove_file(path);
+    }
 }
