@@ -25,5 +25,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: seufinder-${{ matrix.os }}
-          path: target/release/seufinder-rs*
+          path: target/release/seufinder*
           if-no-files-found: error

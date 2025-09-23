@@ -1,9 +1,12 @@
 use chrono::Utc;
+use clap::{error::ErrorKind, ArgAction, CommandFactory, Parser, ValueHint};
 use signal_hook::consts::SIGINT;
 use signal_hook::flag;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
+use std::iter;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -175,6 +178,77 @@ fn pattern_from_index(idx: u64) -> u64 {
     x ^ 0xAAAA_AAAA_AAAA_AAAAu64 ^ (x << 1)
 }
 
+#[derive(Parser, Debug)]
+#[command(name = "seufinder", about = "DRAM bit-flip monitor (Rust)")]
+struct CliArgs {
+    #[arg(short = 'm', value_name = "GiB", default_value_t = 1)]
+    gib: usize,
+
+    #[arg(
+        short = 'i',
+        long = "interval",
+        value_name = "SEC",
+        default_value_t = 900
+    )]
+    interval_sec: u64,
+
+    #[arg(short = 't', value_name = "THREADS", default_value_t = 1)]
+    threads: usize,
+
+    #[arg(long = "verify", value_name = "N", default_value_t = 2)]
+    verify_reads: usize,
+
+    #[arg(long = "clflush", action = ArgAction::SetTrue)]
+    use_clflush: bool,
+
+    #[arg(short = 'o', value_name = "FILE", value_hint = ValueHint::FilePath)]
+    out_csv: Option<PathBuf>,
+
+    #[arg(long = "iterations", value_name = "N", value_parser = clap::value_parser!(i64))]
+    iterations: Option<i64>,
+
+    #[arg(long = "lock-pages", alias = "mlock", action = ArgAction::SetTrue)]
+    lock_pages: bool,
+
+    #[arg(long = "viz-map", value_name = "PATH", value_hint = ValueHint::FilePath)]
+    viz_map: Option<PathBuf>,
+
+    #[arg(long = "viz-cols", value_name = "COLS", default_value_t = 20)]
+    viz_cols: usize,
+
+    #[arg(long = "viz-rows", value_name = "ROWS", default_value_t = 12)]
+    viz_rows: usize,
+
+    #[arg(long = "viz-unclamped", action = ArgAction::SetTrue)]
+    viz_unclamped: bool,
+}
+
+impl CliArgs {
+    fn into_configs(self) -> (Config, VizCfg) {
+        let mut cfg = Config::default();
+        cfg.gib = self.gib;
+        cfg.interval_sec = self.interval_sec;
+        cfg.threads = self.threads.max(1);
+        cfg.verify_reads = self.verify_reads.max(1);
+        cfg.use_clflush = self.use_clflush;
+        if let Some(path) = self.out_csv {
+            cfg.out_csv = path;
+        }
+        cfg.iterations =
+            self.iterations
+                .and_then(|value| if value > 0 { Some(value as u64) } else { None });
+        cfg.lock_pages = self.lock_pages;
+
+        let mut viz = VizCfg::default();
+        viz.map_path = self.viz_map;
+        viz.cols = self.viz_cols.max(1);
+        viz.rows = self.viz_rows.max(1);
+        viz.clamp_0_9 = !self.viz_unclamped;
+
+        (cfg, viz)
+    }
+}
+
 fn parse_args() -> Result<(Config, VizCfg), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     parse_args_from(args)
@@ -184,116 +258,32 @@ fn parse_args_from<I>(args: I) -> Result<(Config, VizCfg), String>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut cfg = Config::default();
-    let mut viz = VizCfg::default();
-
     let args_vec = args.into_iter().collect::<Vec<_>>();
-    let mut i = 0;
-    while i < args_vec.len() {
-        let a = &args_vec[i];
-        match a.as_str() {
-            "-m" => {
-                i += 1;
-                let val = args_vec.get(i).ok_or("-m requires a value")?;
-                cfg.gib = val.parse().map_err(|_| "invalid GiB value".to_string())?;
-            }
-            "-i" => {
-                i += 1;
-                let val = args_vec.get(i).ok_or("-i requires a value")?;
-                cfg.interval_sec = val.parse().map_err(|_| "invalid interval".to_string())?;
-            }
-            "-t" => {
-                i += 1;
-                let val = args_vec.get(i).ok_or("-t requires a value")?;
-                cfg.threads = val
-                    .parse()
-                    .map_err(|_| "invalid thread count".to_string())?;
-            }
-            "--verify" => {
-                i += 1;
-                let val = args_vec.get(i).ok_or("--verify requires a value")?;
-                cfg.verify_reads = val
-                    .parse()
-                    .map_err(|_| "invalid verify count".to_string())?;
-            }
-            "--clflush" => {
-                cfg.use_clflush = true;
-            }
-            "-o" => {
-                i += 1;
-                let val = args_vec.get(i).ok_or("-o requires a value")?;
-                cfg.out_csv = PathBuf::from(val);
-            }
-            "--iterations" => {
-                i += 1;
-                let val = args_vec.get(i).ok_or("--iterations requires a value")?;
-                let parsed: i64 = val.parse().map_err(|_| "invalid iterations".to_string())?;
-                if parsed > 0 {
-                    cfg.iterations = Some(parsed as u64);
-                } else {
-                    cfg.iterations = None;
-                }
-            }
-            "--mlock" | "--lock-pages" => {
-                cfg.lock_pages = true;
-            }
-            "--viz-map" => {
-                i += 1;
-                let val = args_vec.get(i).ok_or("--viz-map requires a value")?;
-                viz.map_path = Some(PathBuf::from(val));
-            }
-            "--viz-cols" => {
-                i += 1;
-                let val = args_vec.get(i).ok_or("--viz-cols requires a value")?;
-                viz.cols = val.parse().map_err(|_| "invalid viz cols".to_string())?;
-            }
-            "--viz-rows" => {
-                i += 1;
-                let val = args_vec.get(i).ok_or("--viz-rows requires a value")?;
-                viz.rows = val.parse().map_err(|_| "invalid viz rows".to_string())?;
-            }
-            "--viz-unclamped" => {
-                viz.clamp_0_9 = false;
-            }
-            "-h" | "--help" => {
-                print_usage();
-                std::process::exit(0);
-            }
-            other => {
-                return Err(format!("unknown option: {}", other));
+    let argv = iter::once("seufinder".to_string()).chain(args_vec.clone());
+    match CliArgs::try_parse_from(argv) {
+        Ok(parsed) => Ok(parsed.into_configs()),
+        Err(err) => {
+            let message = err.to_string();
+            let needs_value_hint = matches!(
+                err.kind(),
+                ErrorKind::MissingRequiredArgument
+                    | ErrorKind::ValueValidation
+                    | ErrorKind::InvalidValue
+            );
+
+            if needs_value_hint && !message.contains("requires a value") {
+                Err(format!("{}\nrequires a value", message))
+            } else {
+                Err(message)
             }
         }
-        i += 1;
     }
-
-    if cfg.threads == 0 {
-        cfg.threads = 1;
-    }
-    if cfg.verify_reads == 0 {
-        cfg.verify_reads = 1;
-    }
-
-    Ok((cfg, viz))
 }
 
 fn print_usage() {
-    println!(
-        "seufinder-rs - DRAM bit-flip monitor (Rust)\n\
-Usage: seufinder-rs [options]\n\
-  -m <GiB>           Memory to occupy (default 1)\n\
-  -i <sec>           Scan interval seconds (default 900=15min)\n\
-  -t <threads>       Reader threads (default 1)\n\
-  --verify <N>       Re-read count per mismatch (default 2)\n\
-  --clflush          Use CLFLUSH before reads (x86/x86_64 only)\n\
-  -o <csv>           CSV output path (default seufinder.csv)\n\
-  --iterations <K>   Run exactly K scans (default infinite)\n\
-  --mlock            Try to lock pages in memory\n\
-  --viz-map <path>   Append ASCII grid to this file each scan\n\
-  --viz-cols <n>     Grid columns (default 20)\n\
-  --viz-rows <n>     Grid rows (default 12)\n\
-  --viz-unclamped    Do not clamp counts to 0-9 (>=10 shown as A..Z)\n\
-  -h, --help         Show this help"
-    );
+    let mut cmd = CliArgs::command();
+    cmd.print_long_help().expect("failed to render help");
+    println!();
 }
 
 fn sleep_until_or_stop(stop: &AtomicBool, deadline: Instant) {
@@ -338,37 +328,35 @@ fn viz_write_frame(viz: &VizCfg, bins: &[u32]) -> io::Result<()> {
 
     let cols = viz.cols;
     let rows = viz.rows;
-    let clamp = viz.clamp_0_9;
 
     for r in 0..rows {
         for c in 0..cols {
             let idx = r * cols + c;
             let val = bins.get(idx).copied().unwrap_or(0);
-            let ch = if clamp {
-                if val == 0 {
-                    '#'
-                } else if val >= 9 {
-                    '9'
-                } else {
-                    char::from(b'0' + val as u8)
-                }
-            } else {
-                if val == 0 {
-                    '#'
-                } else if val <= 9 {
-                    char::from(b'0' + val as u8)
-                } else if val <= 35 {
-                    char::from(b'A' + (val as u8 - 10))
-                } else {
-                    '*'
-                }
-            };
+            let ch = encode_bin(val, viz.clamp_0_9);
             let _ = write!(file, "{}", ch);
         }
         writeln!(file)?;
     }
     writeln!(file)?;
     file.flush()
+}
+
+fn encode_bin(val: u32, clamp: bool) -> char {
+    if clamp {
+        return match val {
+            0 => '#',
+            1..=8 => char::from(b'0' + val as u8),
+            _ => '9',
+        };
+    }
+
+    match val {
+        0 => '#',
+        1..=9 => char::from(b'0' + val as u8),
+        10..=35 => char::from(b'A' + (val as u8 - 10)),
+        _ => '*',
+    }
 }
 
 fn scan_once(
@@ -393,6 +381,7 @@ fn scan_once(
         1
     };
 
+    let ranges = partition_ranges(words, threads);
     let mut local_bins = if map_enabled {
         vec![vec![0u32; cells]; threads]
     } else {
@@ -404,116 +393,62 @@ fn scan_once(
     let clamp = viz.clamp_0_9;
 
     thread::scope(|scope| {
-        let base = if threads == 0 { 0 } else { words / threads };
-        let remainder = if threads == 0 { 0 } else { words % threads };
-
         if map_enabled {
-            let mut next_begin = 0usize;
-            for (t, bins) in local_bins.iter_mut().enumerate() {
-                let mut len = base;
-                if t < remainder {
-                    len += 1;
+            for (t, (range, bins)) in ranges
+                .iter()
+                .cloned()
+                .zip(local_bins.iter_mut())
+                .enumerate()
+            {
+                if range.is_empty() {
+                    continue;
                 }
-                let begin = next_begin;
-                let end = std::cmp::min(words, begin.saturating_add(len));
-                next_begin = end;
-
                 let region = Arc::clone(region);
                 let csv = Arc::clone(csv);
                 let stats = Arc::clone(stats);
                 let stop = Arc::clone(stop);
                 scope.spawn(move || {
-                    let bins = bins;
-                    let ptr = region.as_ptr();
-                    for i in begin..end {
-                        if stop.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        let exp = pattern_from_index(i as u64);
-                        if use_clflush {
-                            unsafe { clflush64(ptr.add(i) as *const u8) };
-                        }
-                        let v1 = unsafe { std::ptr::read_volatile(ptr.add(i)) };
-                        if v1 != exp {
-                            let mut mismatches = 0usize;
-                            let mut last = v1;
-                            for _ in 1..verify_reads {
-                                if use_clflush {
-                                    unsafe { clflush64(ptr.add(i) as *const u8) };
-                                }
-                                thread::sleep(Duration::from_micros(50));
-                                let vr = unsafe { std::ptr::read_volatile(ptr.add(i)) };
-                                last = vr;
-                                if vr != exp {
-                                    mismatches += 1;
-                                }
-                            }
-                            if mismatches == verify_reads - 1 {
-                                stats.detected.fetch_add(1, Ordering::Relaxed);
-                                log_event(&csv, t, i as u64, exp, last, verify_reads);
-                                unsafe { std::ptr::write_volatile(ptr.add(i), exp) };
-                                let idx = std::cmp::min(cells - 1, i / words_per_cell);
-                                if clamp {
-                                    if bins[idx] < 9 {
-                                        bins[idx] += 1;
-                                    }
-                                } else {
-                                    bins[idx] = bins[idx].saturating_add(1);
-                                }
-                            }
-                        }
-                        stats.scanned.fetch_add(1, Ordering::Relaxed);
-                    }
+                    let bins_slice = bins.as_mut_slice();
+                    scan_range(
+                        range,
+                        t,
+                        region,
+                        csv,
+                        stats,
+                        stop,
+                        use_clflush,
+                        verify_reads,
+                        Some(bins_slice),
+                        words_per_cell,
+                        cells,
+                        clamp,
+                    );
                 });
             }
         } else {
-            let mut next_begin = 0usize;
-            for t in 0..threads {
-                let mut len = base;
-                if t < remainder {
-                    len += 1;
+            for (t, range) in ranges.into_iter().enumerate() {
+                if range.is_empty() {
+                    continue;
                 }
-                let begin = next_begin;
-                let end = std::cmp::min(words, begin.saturating_add(len));
-                next_begin = end;
-
                 let region = Arc::clone(region);
                 let csv = Arc::clone(csv);
                 let stats = Arc::clone(stats);
                 let stop = Arc::clone(stop);
                 scope.spawn(move || {
-                    let ptr = region.as_ptr();
-                    for i in begin..end {
-                        if stop.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        let exp = pattern_from_index(i as u64);
-                        if use_clflush {
-                            unsafe { clflush64(ptr.add(i) as *const u8) };
-                        }
-                        let v1 = unsafe { std::ptr::read_volatile(ptr.add(i)) };
-                        if v1 != exp {
-                            let mut mismatches = 0usize;
-                            let mut last = v1;
-                            for _ in 1..verify_reads {
-                                if use_clflush {
-                                    unsafe { clflush64(ptr.add(i) as *const u8) };
-                                }
-                                thread::sleep(Duration::from_micros(50));
-                                let vr = unsafe { std::ptr::read_volatile(ptr.add(i)) };
-                                last = vr;
-                                if vr != exp {
-                                    mismatches += 1;
-                                }
-                            }
-                            if mismatches == verify_reads - 1 {
-                                stats.detected.fetch_add(1, Ordering::Relaxed);
-                                log_event(&csv, t, i as u64, exp, last, verify_reads);
-                                unsafe { std::ptr::write_volatile(ptr.add(i), exp) };
-                            }
-                        }
-                        stats.scanned.fetch_add(1, Ordering::Relaxed);
-                    }
+                    scan_range(
+                        range,
+                        t,
+                        region,
+                        csv,
+                        stats,
+                        stop,
+                        use_clflush,
+                        verify_reads,
+                        None,
+                        words_per_cell,
+                        cells,
+                        clamp,
+                    );
                 });
             }
         }
@@ -538,6 +473,82 @@ fn scan_once(
         let _ = guard.flush();
     }
     Ok(())
+}
+
+fn partition_ranges(total: usize, parts: usize) -> Vec<Range<usize>> {
+    if parts == 0 {
+        return vec![0..0];
+    }
+    let mut ranges = Vec::with_capacity(parts);
+    let base = total / parts;
+    let remainder = total % parts;
+    let mut start = 0usize;
+    for i in 0..parts {
+        let mut end = start + base;
+        if i < remainder {
+            end += 1;
+        }
+        end = std::cmp::min(end, total);
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
+}
+
+fn scan_range(
+    range: Range<usize>,
+    thread_index: usize,
+    region: Arc<Region>,
+    csv: Arc<Mutex<BufWriter<File>>>,
+    stats: Arc<Stats>,
+    stop: Arc<AtomicBool>,
+    use_clflush: bool,
+    verify_reads: usize,
+    mut bins: Option<&mut [u32]>,
+    words_per_cell: usize,
+    cells: usize,
+    clamp: bool,
+) {
+    let ptr = region.as_ptr();
+    for idx in range {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let expected = pattern_from_index(idx as u64);
+        if use_clflush {
+            unsafe { clflush64(ptr.add(idx) as *const u8) };
+        }
+        let observed = unsafe { std::ptr::read_volatile(ptr.add(idx)) };
+        if observed != expected {
+            let mut last = observed;
+            let confirmed = (1..verify_reads).all(|_| {
+                if use_clflush {
+                    unsafe { clflush64(ptr.add(idx) as *const u8) };
+                }
+                thread::sleep(Duration::from_micros(50));
+                let reread = unsafe { std::ptr::read_volatile(ptr.add(idx)) };
+                last = reread;
+                reread != expected
+            });
+
+            if confirmed {
+                stats.detected.fetch_add(1, Ordering::Relaxed);
+                log_event(&csv, thread_index, idx as u64, expected, last, verify_reads);
+                unsafe { std::ptr::write_volatile(ptr.add(idx), expected) };
+                if let Some(bins) = bins.as_mut() {
+                    let slot = std::cmp::min(cells - 1, idx / words_per_cell);
+                    if clamp {
+                        if bins[slot] < 9 {
+                            bins[slot] += 1;
+                        }
+                    } else {
+                        bins[slot] = bins[slot].saturating_add(1);
+                    }
+                }
+            }
+        }
+        stats.scanned.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn main() {

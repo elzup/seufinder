@@ -15,13 +15,13 @@ Rust 1.74 or newer is recommended. If `cargo` is available, no additional setup 
 2. Run
 
    ```sh
-   ./target/release/seufinder-rs [options]
+   ./target/release/seufinder [options]
    ```
 
    Example: reserve 1 GiB and scan every 15 minutes
 
    ```sh
-   ./target/release/seufinder-rs \
+   ./target/release/seufinder \
      -m 1 -i 900 -t 1 --verify 2 \
      -o seufinder.csv --viz-map viz.txt --viz-cols 20 --viz-rows 12
    ```
