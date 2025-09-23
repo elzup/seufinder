@@ -15,30 +15,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install deps (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y g++
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Build (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: g++ -O2 -std=c++17 -o seufinder seufinder.cpp
-
-      - name: Build (macOS)
-        if: matrix.os == 'macos-latest'
-        run: clang++ -O2 -std=c++17 -o seufinder seufinder.cpp
-
-      - name: Setup MSVC (Windows)
-        if: matrix.os == 'windows-latest'
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Build (Windows)
-        if: matrix.os == 'windows-latest'
-        run: cl /EHsc /O2 /std:c++17 /Fe:seufinder.exe seufinder.cpp
+      - name: Build (release)
+        run: cargo build --release
 
       - name: Package artifact
         uses: actions/upload-artifact@v4
         with:
           name: seufinder-${{ matrix.os }}
-          path: |
-            seufinder*
-            seufinder.exe
+          path: target/release/seufinder-rs*
+          if-no-files-found: error

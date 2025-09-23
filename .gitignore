@@ -6,6 +6,10 @@ seufinder
 *.exe
 *.out
 
+# Rust build artifacts
+target/
+**/*.rs.bk
+
 # Temporary files
 *.tmp
 *.log
