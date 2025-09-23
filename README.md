@@ -1,6 +1,6 @@
 # SeuFinder
 
-SeuFinder is a Rust tool for detecting and recording Single Event Upsets (SEU). The legacy C++ implementation (`seufinder.cpp`) is still shipped, but the Rust version is the actively maintained one.
+SeuFinder is a Rust tool for detecting and recording Single Event Upsets (SEU).
 
 ## Quick Start (Rust)
 
@@ -33,8 +33,6 @@ Rust 1.74 or newer is recommended. If `cargo` is available, no additional setup 
 - `src/main.rs`: Rust implementation
 - `Cargo.toml`: Rust project definition
 - `Cargo.lock`: Locked dependency versions (generated)
-- `seufinder.cpp`: Legacy C++ implementation
-- `spec.md`: Specification and experiment notes
 
 ## Key Options
 
@@ -55,15 +53,6 @@ Rust 1.74 or newer is recommended. If `cargo` is available, no additional setup 
 - Detect DRAM bit flips (SEU) and log them to CSV
 - Produce ASCII grids for quick visualization
 - Designed for large memory footprints—ensure sufficient free RAM
-
-## C++ Version
-
-The original C++ implementation remains available as `seufinder.cpp`. If you need it, build and run like so:
-
-```sh
-g++ -std=c++17 seufinder.cpp -o seufinder
-./seufinder [options]
-```
 
 ## License
 
