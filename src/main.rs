@@ -1,7 +1,10 @@
+mod util;
+
 use chrono::Utc;
 use clap::{error::ErrorKind, ArgAction, CommandFactory, Parser, ValueHint};
 use signal_hook::consts::SIGINT;
 use signal_hook::flag;
+use std::cmp;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -12,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use util::{encode_bin, partition_ranges};
 
 #[cfg(unix)]
 use signal_hook::consts::SIGTERM;
@@ -160,6 +164,86 @@ impl Stats {
             scanned: AtomicU64::new(0),
             detected: AtomicU64::new(0),
         }
+    }
+}
+
+struct Detection {
+    index: usize,
+    expected: u64,
+    observed: u64,
+}
+
+struct ScanContext<'a> {
+    region: Arc<Region>,
+    csv: Arc<Mutex<BufWriter<File>>>,
+    stats: Arc<Stats>,
+    stop: Arc<AtomicBool>,
+    verify_reads: usize,
+    use_clflush: bool,
+    bins: Option<&'a mut [u32]>,
+    words_per_cell: usize,
+    cells: usize,
+    clamp: bool,
+}
+
+impl<'a> ScanContext<'a> {
+    fn new(
+        region: Arc<Region>,
+        csv: Arc<Mutex<BufWriter<File>>>,
+        stats: Arc<Stats>,
+        stop: Arc<AtomicBool>,
+        verify_reads: usize,
+        use_clflush: bool,
+        bins: Option<&'a mut [u32]>,
+        words_per_cell: usize,
+        cells: usize,
+        clamp: bool,
+    ) -> Self {
+        Self {
+            region,
+            csv,
+            stats,
+            stop,
+            verify_reads: verify_reads.max(1),
+            use_clflush,
+            bins,
+            words_per_cell: cmp::max(1, words_per_cell),
+            cells: cmp::max(1, cells),
+            clamp,
+        }
+    }
+
+    fn should_stop(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    fn record_detection(&self, thread_index: usize, detection: &Detection) {
+        self.stats.detected.fetch_add(1, Ordering::Relaxed);
+        log_event(
+            &self.csv,
+            thread_index,
+            detection.index as u64,
+            detection.expected,
+            detection.observed,
+            self.verify_reads,
+        );
+    }
+
+    fn update_bins(&mut self, index: usize) {
+        if let Some(bins) = self.bins.as_mut() {
+            let slot = cmp::min(self.cells - 1, index / self.words_per_cell);
+            if self.clamp {
+                if bins[slot] < 9 {
+                    bins[slot] += 1;
+                }
+            } else {
+                bins[slot] = bins[slot].saturating_add(1);
+            }
+        }
+    }
+
+    fn increment_scanned(&self) {
+        self.stats.scanned.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -342,23 +426,6 @@ fn viz_write_frame(viz: &VizCfg, bins: &[u32]) -> io::Result<()> {
     file.flush()
 }
 
-fn encode_bin(val: u32, clamp: bool) -> char {
-    if clamp {
-        return match val {
-            0 => '#',
-            1..=8 => char::from(b'0' + val as u8),
-            _ => '9',
-        };
-    }
-
-    match val {
-        0 => '#',
-        1..=9 => char::from(b'0' + val as u8),
-        10..=35 => char::from(b'A' + (val as u8 - 10)),
-        _ => '*',
-    }
-}
-
 fn scan_once(
     region: &Arc<Region>,
     cfg: &Config,
@@ -408,21 +475,19 @@ fn scan_once(
                 let stats = Arc::clone(stats);
                 let stop = Arc::clone(stop);
                 scope.spawn(move || {
-                    let bins_slice = bins.as_mut_slice();
-                    scan_range(
-                        range,
-                        t,
+                    let ctx = ScanContext::new(
                         region,
                         csv,
                         stats,
                         stop,
-                        use_clflush,
                         verify_reads,
-                        Some(bins_slice),
+                        use_clflush,
+                        Some(&mut bins[..]),
                         words_per_cell,
                         cells,
                         clamp,
                     );
+                    scan_range(range, t, ctx);
                 });
             }
         } else {
@@ -435,20 +500,19 @@ fn scan_once(
                 let stats = Arc::clone(stats);
                 let stop = Arc::clone(stop);
                 scope.spawn(move || {
-                    scan_range(
-                        range,
-                        t,
+                    let ctx = ScanContext::new(
                         region,
                         csv,
                         stats,
                         stop,
-                        use_clflush,
                         verify_reads,
+                        use_clflush,
                         None,
                         words_per_cell,
                         cells,
                         clamp,
                     );
+                    scan_range(range, t, ctx);
                 });
             }
         }
@@ -475,80 +539,60 @@ fn scan_once(
     Ok(())
 }
 
-fn partition_ranges(total: usize, parts: usize) -> Vec<Range<usize>> {
-    if parts == 0 {
-        return vec![0..0];
-    }
-    let mut ranges = Vec::with_capacity(parts);
-    let base = total / parts;
-    let remainder = total % parts;
-    let mut start = 0usize;
-    for i in 0..parts {
-        let mut end = start + base;
-        if i < remainder {
-            end += 1;
-        }
-        end = std::cmp::min(end, total);
-        ranges.push(start..end);
-        start = end;
-    }
-    ranges
-}
-
-fn scan_range(
-    range: Range<usize>,
-    thread_index: usize,
-    region: Arc<Region>,
-    csv: Arc<Mutex<BufWriter<File>>>,
-    stats: Arc<Stats>,
-    stop: Arc<AtomicBool>,
-    use_clflush: bool,
-    verify_reads: usize,
-    mut bins: Option<&mut [u32]>,
-    words_per_cell: usize,
-    cells: usize,
-    clamp: bool,
-) {
-    let ptr = region.as_ptr();
+fn scan_range(range: Range<usize>, thread_index: usize, mut ctx: ScanContext<'_>) {
+    let ptr = ctx.region.as_ptr();
     for idx in range {
-        if stop.load(Ordering::Relaxed) {
+        if ctx.should_stop() {
             return;
         }
-        let expected = pattern_from_index(idx as u64);
-        if use_clflush {
-            unsafe { clflush64(ptr.add(idx) as *const u8) };
-        }
-        let observed = unsafe { std::ptr::read_volatile(ptr.add(idx)) };
-        if observed != expected {
-            let mut last = observed;
-            let confirmed = (1..verify_reads).all(|_| {
-                if use_clflush {
-                    unsafe { clflush64(ptr.add(idx) as *const u8) };
-                }
-                thread::sleep(Duration::from_micros(50));
-                let reread = unsafe { std::ptr::read_volatile(ptr.add(idx)) };
-                last = reread;
-                reread != expected
-            });
 
-            if confirmed {
-                stats.detected.fetch_add(1, Ordering::Relaxed);
-                log_event(&csv, thread_index, idx as u64, expected, last, verify_reads);
-                unsafe { std::ptr::write_volatile(ptr.add(idx), expected) };
-                if let Some(bins) = bins.as_mut() {
-                    let slot = std::cmp::min(cells - 1, idx / words_per_cell);
-                    if clamp {
-                        if bins[slot] < 9 {
-                            bins[slot] += 1;
-                        }
-                    } else {
-                        bins[slot] = bins[slot].saturating_add(1);
-                    }
-                }
-            }
+        if let Some(detection) = detect_flip(ptr, idx, ctx.verify_reads, ctx.use_clflush) {
+            ctx.record_detection(thread_index, &detection);
+            ctx.update_bins(idx);
         }
-        stats.scanned.fetch_add(1, Ordering::Relaxed);
+
+        ctx.increment_scanned();
     }
+}
+
+fn detect_flip(
+    ptr: *mut u64,
+    index: usize,
+    verify_reads: usize,
+    use_clflush: bool,
+) -> Option<Detection> {
+    let expected = pattern_from_index(index as u64);
+    let cell = unsafe { ptr.add(index) };
+
+    if use_clflush {
+        unsafe { clflush64(cell as *const u8) };
+    }
+
+    let mut last = unsafe { std::ptr::read_volatile(cell) };
+    if last == expected {
+        return None;
+    }
+
+    let confirmed = (1..verify_reads).all(|_| {
+        if use_clflush {
+            unsafe { clflush64(cell as *const u8) };
+        }
+        thread::sleep(Duration::from_micros(50));
+        last = unsafe { std::ptr::read_volatile(cell) };
+        last != expected
+    });
+
+    if !confirmed {
+        return None;
+    }
+
+    unsafe { std::ptr::write_volatile(cell, expected) };
+
+    Some(Detection {
+        index,
+        expected,
+        observed: last,
+    })
 }
 
 fn main() {
