@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use util::{encode_bin, partition_ranges};
+use util::{encode_bin, partition_ranges, pattern_from_index, sleep_until_or_stop};
 
 #[cfg(unix)]
 use signal_hook::consts::SIGTERM;
@@ -252,16 +252,6 @@ fn now_iso8601_utc() -> String {
     now.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()
 }
 
-fn pattern_from_index(idx: u64) -> u64 {
-    let mut x = idx.wrapping_add(0x9E37_79B9_7F4A_7C15u64);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xff51_afd7_ed55_8ccdu64);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53u64);
-    x ^= x >> 33;
-    x ^ 0xAAAA_AAAA_AAAA_AAAAu64 ^ (x << 1)
-}
-
 #[derive(Parser, Debug)]
 #[command(name = "seufinder", about = "DRAM bit-flip monitor (Rust)")]
 struct CliArgs {
@@ -368,15 +358,6 @@ fn print_usage() {
     let mut cmd = CliArgs::command();
     cmd.print_long_help().expect("failed to render help");
     println!();
-}
-
-fn sleep_until_or_stop(stop: &AtomicBool, deadline: Instant) {
-    while !stop.load(Ordering::Relaxed) {
-        if Instant::now() >= deadline {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
 }
 
 fn log_event(
